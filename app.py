@@ -289,6 +289,7 @@ def load_excel_data(uploaded_file):
 # ============================================================
 def interpolate_3d(df_data, df_geo, nx=60, ny=60, nz=30):
     geo_map = dict(zip(df_geo["LINE"], df_geo["Y_POSITION"]))
+    df_data = df_data.copy()
     df_data["Y"] = df_data["LINE"].map(geo_map)
     df_data = df_data.dropna(subset=["Y"])
 
@@ -297,19 +298,46 @@ def interpolate_3d(df_data, df_geo, nx=60, ny=60, nz=30):
     z = df_data["DEPTH"].values.astype(float)
     r = df_data["RESISTIVITY"].values.astype(float)
 
+    # ── Jika hanya 1 lintasan (y unik = 1), duplikasi dengan offset kecil
+    # ── agar Delaunay 3D tidak gagal karena titik coplanar
+    n_lines = len(np.unique(y))
+    if n_lines < 2:
+        y_offset = max(np.ptp(x) * 0.01, 0.1)
+        x = np.concatenate([x, x])
+        y = np.concatenate([y, y + y_offset])
+        z = np.concatenate([z, z])
+        r = np.concatenate([r, r])
+
+    # ── Tambahkan jitter sangat kecil untuk mencegah degenerasi Qhull
+    rng = np.random.default_rng(42)
+    eps_x = np.ptp(x) * 1e-6 if np.ptp(x) > 0 else 1e-6
+    eps_y = np.ptp(y) * 1e-6 if np.ptp(y) > 0 else 1e-6
+    eps_z = np.ptp(z) * 1e-6 if np.ptp(z) > 0 else 1e-6
+    x = x + rng.uniform(-eps_x, eps_x, size=x.shape)
+    y = y + rng.uniform(-eps_y, eps_y, size=y.shape)
+    z = z + rng.uniform(-eps_z, eps_z, size=z.shape)
+
     xi = np.linspace(x.min(), x.max(), nx)
     yi = np.linspace(y.min(), y.max(), ny)
     zi = np.linspace(z.min(), z.max(), nz)
 
     XX, YY, ZZ = np.meshgrid(xi, yi, zi, indexing="ij")
     points = np.column_stack([x, y, z])
-    RR = griddata(points, r, (XX, YY, ZZ), method="linear")
 
-    # Fill NaN dengan nearest
-    mask = np.isnan(RR)
-    if mask.any():
-        RR_nn = griddata(points, r, (XX, YY, ZZ), method="nearest")
-        RR[mask] = RR_nn[mask]
+    # ── Coba linear, fallback ke nearest jika Qhull / triangulasi gagal
+    try:
+        RR = griddata(points, r, (XX, YY, ZZ), method="linear")
+        mask = np.isnan(RR)
+        if mask.any():
+            RR_nn = griddata(points, r, (XX, YY, ZZ), method="nearest")
+            RR[mask] = RR_nn[mask]
+    except Exception:
+        # Fallback total ke nearest – selalu berhasil
+        RR = griddata(points, r, (XX, YY, ZZ), method="nearest")
+
+    # Pastikan tidak ada NaN tersisa
+    if np.isnan(RR).any():
+        RR = np.where(np.isnan(RR), np.nanmedian(r), RR)
 
     return XX, YY, ZZ, RR, xi, yi, zi
 
